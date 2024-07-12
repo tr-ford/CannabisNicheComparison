@@ -1,5 +1,5 @@
-# Niche_Models.R
-# Step 4
+# 03Niche_Models.R
+# Step 3
 
 # Tori Ford
 # April 2, 2024
@@ -8,11 +8,12 @@
 # Modified from tutorial, native dynamics vs invaded
 
 
-
+# Load in relevant Libraries
 library(ecospat)
 library(geodata)
 library(raster)
-# library(maptools)
+library(rangeBuilder)
+library(maptools)
 library(sf)
 library(dplyr)
 library(devtools)
@@ -20,100 +21,44 @@ library(terra)
 library(ade4)
 library(ape)
 library(biomod2)
-library(spam)
-library(spam64)
+
 
 
 # Premodel ----------------------------------------------------------------
-
+# During premodeling, you must organize both rasters and occurrences!
 
 datum <- read.csv("raw/CJG_popk2_for_TF.csv")
-datum <- datum[,c(3,4)]
+datum <- datum[,c(3,4)] ## Subset out long~lat coordinates, whole dataset
 s_datum <- read.csv("raw/Senv1.csv")
-s_datum <- s_datum[,c(1,2)]
-s_datum <- s_datum[complete.cases(data.frame(s_datum)), ]
+s_datum <- s_datum[,c(1,2)] ## Subset out long~lat coordinates, population dataset
 n_datum <- read.csv("raw/Nenv2.csv")
-n_datum <- n_datum[,c(1,2)]
-n_datum <- n_datum[complete.cases(data.frame(n_datum)), ]
-
-# # Load World Soils Data
-# 
-# sworld_var <- c("sand", "silt", "soc", "bdod","cfvo", "clay", "nitrogen","ocd","phh2o")
-# depth <- c(5, 15, 30) 
-# 
-# # Set up variables
-# five <- paste(sworld_var,"_5",sep = "")
-# fifteen <- paste(sworld_var,"_15",sep = "")
-# thirty <- paste(sworld_var,"_30",sep = "")
-# 
-# # Total list of variables + depths
-# soils <- c(five,fifteen,thirty)
-# 
-# # Open Empty Lists
-# soil <- c()
-# 
-# for (p in 1:length(soils)) {
-# 	
-# 		s <- strsplit(soils[[p]],"[_]")[[1]][1]
-# 		d <- as.numeric(strsplit(soils[[p]],"[_]")[[1]][2])
-# 		print(paste0(s,d))
-# 		
-# 		soilworld <- geodata::soil_world(
-# 			var = s,
-# 			depth = d,
-# 			stat="mean",
-# 			path = "../../../../Desktop/ToriBigData/rasters/"
-# 		) ## Soil download not working, use VSI to interface in the meantime, read to local variable to resample
-# 		# soil[[p]] <- soilworld
-# 	
-# 	
-# }
-# 
-# ## Create a list for sets of variables downloaded with same naming convention, update as you go
-# wc_var <- c("bio","srad","vapr")
-# 
-# ## Download for WorldClim Data
-# 
-# ## Create Empty list
-# clim <- c()
-# 
-# ## Loop for WorldClim Data
-# for (q in 1:length(wc_var)) {
-# 	var <- wc_var[q]
-# 	print(var)
-# 	
-# 	worldclim <- geodata::worldclim_global(var = var,
-# 																				 res = .5,
-# 																				 path = "../../../../Desktop/ToriBigData/rasters/")
-# 	# clim[[q]] <- worldclim
-# 	
-# }
+n_datum <- n_datum[,c(1,2)] ## Subset out long~lat coordinates, population dataset
 
 
+# Read in total area rasters
+rast_files <- list.files(paste0("raw/rast/total"), pattern = "*.asc", full.names = TRUE)
 
-# ## Unlist and Stack Predictor rasters, use numerals to not overwrite OG rasters (Use Raster package if crop too large for terra)
-# soil2 <- stack(rast(soil))
-# clim2 <- stack(rast(unlist(clim)))
-# 
-# ## Extend Rasters to Match Largest Extent (soilgridsv2, in initial case)
-# clim3 <- raster::crop(clim2,extent(soil2))
-# 
-# ## Stack rasters together with vector
-# predictors <- c(rast(soil2),rast(clim3))
+# ## if extents differ, crop (by smaller extent) 
+# one <- rast(rast_files[1:27])
+# two <- terra::crop(rast(rast_files[28:47]), ext(one))
+
+## Render raster in, use <- c() if rasters are already loaded
+predictors <- rast(rast_files)
+
+## Extract data from predictor layers per occ point
+datum.occ <- cbind(datum, terra::extract(predictors, datum))
+datum.occ <- datum.occ[complete.cases(data.frame(datum.occ)), ] # use complete cases to remove
+
+## Extract per population
+s.occ <- cbind(s_datum, terra::extract(predictors, s_datum))
+s.occ <- s.occ[complete.cases(data.frame(s.occ)), ]
+s.occ <- s.occ[,c(4:73)] # .occ's will only contain predictor data
+n.occ <- cbind(n_datum, terra::extract(predictors, n_datum))
+n.occ <- n.occ[complete.cases(data.frame(n.occ)), ]
+n.occ <- n.occ[,c(4:73)] # .occ's will only contain predictor data
 
 
-## AS OF APRIL 30 2024, THIS SCRIPT WON'T WORK USING ALL RASTERS, IF THIS IS TRUE FOR YOU, MOVE TO NEXT SCRIPT AND A SMALLER LIST OF RASTERS WILL BE GENERATED
-rast_files <- list.files(paste0("../../../../Desktop/ToriBigData/rasters/"), pattern = "*.tif", full.names = TRUE)
-
-## Stack Your Cropped Area Rasters, crop (by smaller extent) if extents differ
-one <- raster::stack(rast_files[1:27])
-two <- raster::crop(raster::stack(rast_files[28:71]), extent(one))
-
-predictors <- stack(one, two)
-
-
-## Next step, extract data points
-## Crop to disinct regions,
+## Next step, calculate the extents of the populations
 
 s_ext <- s_datum %>% 
 	st_as_sf(coords = c("x","y"), crs = 4326) %>% 
@@ -123,37 +68,35 @@ n_ext <- n_datum %>%
 	st_as_sf(coords = c("x","y"), crs = 4326) %>% 
 	st_bbox()
 
-## Crop to Extent of S and N Populations, Output = Raster Stack
+
+## Crop to Extent of S and N Populations, use clusters for faster processing
+
+beginCluster(10)
 s_ENVR <- crop(predictors, s_ext)
-writeRaster(s_ENVR,"../../../../Desktop/ToriBigData/sENVR.grd", overwrite=T)
 n_ENVR <- crop(predictors, n_ext)
-writeRaster(n_ENVR,"../../../../Desktop/ToriBigData/nENVR.grd", overwrite=T)
+endCluster()
 
+## Extract values normally:
+beginCluster(10)
+s_ENVM <- values(s_ENVR)
+n_ENVM <- values(n_ENVR)
+endCluster()
 
-## Exttract OOCs
-s_extract <- cbind(s_datum, extract(s_ENVR, s_datum))
-s_extract2 <- s_extract[,colSums(is.na(s_extract))<nrow(s_extract)]
-s_extract2 <- s_extract2[complete.cases(data.frame(s_extract2)), ]
-
-n_extract <- cbind(n_datum, extract(n_ENVR, n_datum))
-n_extract2 <- n_extract[,colSums(is.na(n_extract))<nrow(n_extract)]
-n_extract2 <- n_extract2[complete.cases(data.frame(n_extract2)), ]
-
-## Generate a Matrix of Cropped Raster Values
-s_ENVM <- getValues(stack(s_ENVR))
-n_ENVM <- getValues(stack(n_ENVR))
+## Write out rasters, this may take some time
+writeRaster(s_ENVR,"rst/sENVR.grd", overwrite=T)
+writeRaster(n_ENVR,"rst/nENVR.grd", overwrite=T)
 
 # Complete Cases, Save
 s_ENVM <- s_ENVM[complete.cases(s_ENVM), ]
-saveRDS(s_ENVM, file= "../../../../Desktop/ToriBigData/sENVM.rds")
+saveRDS(s_ENVM, file= "raw/sENVM.rds")
 n_ENVM <- n_ENVM[complete.cases(n_ENVM), ]
-saveRDS(n_ENVM, file= "../../../../Desktop/ToriBigData/nENVM.rds")
+saveRDS(n_ENVM, file= "raw/nENVM.rds")
 
 # produce global environmental background data
 globalEnvM <- rbind(s_ENVM, n_ENVM)
-saveRDS(globalEnvM, file= "../../../../Desktop/ToriBigData/globeENVM.rds")
+saveRDS(globalEnvM, file= "raw/globeENVM.rds")
 
-  ## Generate Basic Statistics of both Populations
+## Generate Basic Statistics of both Populations
 Sstats <- apply(s_datum, 2, function(x) c(min = min(x), median = median(x), mean = mean(x), max = max(x), sd = sd(x)))
 Nstats <- apply(n_datum, 2, function(x) c(min = min(x), median = median(x), mean = mean(x), max = max(x), sd = sd(x)))
 
@@ -161,54 +104,143 @@ Nstats <- apply(n_datum, 2, function(x) c(min = min(x), median = median(x), mean
 ENvStats <- rbind(Sstats, Nstats)
 write.csv(ENvStats, "rst/ENVstats.csv", row.names = F)
 
-## Spatial Autocorrelation
+## Spatial Autocorrelation, if the points are heavily correlated, you may want to consider variable reducing methods. 
 #S population
 pdf("rst/Spop_correlogram.pdf")
-ecospat.mantel.correlogram(dfvar=s_extract2[c(1:72)],colxy=1:2, n=100, colvar=3:72, 
+ecospat.mantel.correlogram(dfvar=s_extract[c(1:48)],colxy=1:2, n=100, colvar=3:48, 
 													 max=10, nclass=10, nperm=100)
 dev.off()
 #N Population
 pdf("rst/Npop_correlogram.pdf")
-ecospat.mantel.correlogram(dfvar=n_extract2[c(1:72)],colxy=1:2, n=100, colvar=3:72, 
+ecospat.mantel.correlogram(dfvar=n_extract[c(1:48)],colxy=1:2, n=100, colvar=3:48, 
 													 max=10, nclass=10, nperm=100)
 dev.off()
 
 
 # Modeling ----------------------------------------------------------------
 
-
+# Run PCA on global value matrix
 pca.clim <- dudi.pca(globalEnvM, center = TRUE,
 										 scale = TRUE, scannf = FALSE, nf = 2)
 
 global.scores <- pca.clim$li
 
+# Find supplementary rows in PCA by matching to columns from occ dataset
 SLS.scores <-
-	suprow(pca.clim,
-				 data.frame(s_datum)[, colnames(globalEnvM)])$li   
-NLS.scores <-
-	suprow(pca.clim,
-				 data.frame(n_datum)[, colnames(globalEnvM)])$li
+	suprow(pca.clim, s.occ[, colnames(globalEnvM)])$li   
 
+NLS.scores <-
+	suprow(pca.clim, n.occ[, colnames(globalEnvM)])$li
+
+# Find supplementary rows in PCA by matching to columns from envm dataset
 SEnv.scores <- suprow(pca.clim, s_ENVM)$li
 NEnv.scores <- suprow(pca.clim, n_ENVM)$li
 
 
-data.frame(s_datum)[, colnames(globalEnvM)]
+
 # calculate the Occurrence Density Grid for both native and invasive species
 SpopGrid <- ecospat.grid.clim.dyn(global.scores,
-																		SEnv.scores,
-																		SLS.scores)
+																	SEnv.scores,
+																	SLS.scores)
 
 NpopGrid <- ecospat.grid.clim.dyn(global.scores,
-																			NEnv.scores, 
-																			NLS.scores)
+																	NEnv.scores, 
+																	NLS.scores)
 
 ## Plot Occurrence Density grid
+pdf("rst/ESpace_Niche_Overlap.pdf")
 ecospat.plot.niche.dyn(SpopGrid, NpopGrid, quant = 0.1, interest = 2, title = "Niche Overlap", name.axis1 = "PC1", name.axis2 = "PC2")
+dev.off()
+
+# plot variable contributions
+
+ecospat.plot.contrib(contrib=pca.clim$co, eigen=pca.clim$eig)
+
+# Expansion = sp2
+# Intersection  = If intersection=NA, the analysis is performed on the whole environmental extent (native and invaded). If intersection=0, the analysis is performed at the intersection between native and invaded range. If intersection=0.05, the analysis is performed at the intersection of the 5th quantile of both native and invaded environmental densities.
+ecospat.niche.dyn.index(SpopGrid, NpopGrid, intersection = NA)$dynamic.index.w
+
+
+## Geographic projection of the selected "index" stats
+geoProj <- ecospat.niche.dynIndexProjGeo(SpopGrid,
+																				 NpopGrid,
+																				 env = raster::stack(predictors),index="unfilling")
+
+
+## G-space Projection
+# Here, we define the bounding box of our area of interest. This will change depending on the populations of observation
+geoGrid <- expand.grid(longitude =
+											 	seq(20, 160, length.out = 250),
+											 latitude =
+											 	seq(-20, 80, length.out = 250))
+
+# Open map dataset from "maps", subset a region out
+data("wrld_simpl")
+mask <- subset(wrld_simpl, REGION = c("142","150")) # Region for Central Asia
+
+## Use the bounding boxes as grids, and dataset as cordinates, and countries for mask
+s.GeoGrid <- ecospat.grid.clim.dyn(geoGrid, geoGrid,
+																			coordinates(s_datum),
+																			geomask = mask)
+n.GeoGrid <- ecospat.grid.clim.dyn(geoGrid, geoGrid,
+																	 coordinates(n_datum),
+																	 geomask = mask)
+
+# Plot and save as pdf file
+pdf("rst/GSpace_Niche_Overlap.pdf")
+ecospat.plot.niche.dyn(s.GeoGrid, n.GeoGrid, quant = 0)
+plot(wrld_simpl, add = TRUE)
+dev.off()
+
+
+# Sim-Eq Tests ------------------------------------------------------------
+
+# perform the Niche Equivalency Test
+
+eq.test <- ecospat.niche.equivalency.test(SpopGrid, NpopGrid, rep = 100, ncores = 2)
+
+# perform the Niche Similarity Test
+
+sim.test <- ecospat.niche.similarity.test(SpopGrid, NpopGrid, rep = 100, rand.type = 2, ncores = 2)
+
+# plot Equivalency and Similarity Test
+pdf("rst/Niche_EQandSIM_NSPop.pdf")
+par(mfrow=c(1,2))
+ecospat.plot.overlap.test(eq.test, "D", "Equivalency") 
+ecospat.plot.overlap.test(sim.test, "D", "Similarity")
+dev.off()
 
 
 
-## List of Figures
-## Histogram: Similarity vs Equivalency
-## Niche Dynamics Centriods: Plot against most important variables from MAXENT
+# Dynamics ----------------------------------------------------------------
 
+# Create a niche overlap directory for all response variable dynamics plots
+dir.create("rst/NicheOverlapDyn")
+
+## Maybe loop
+for (x in 1:ncol(s.occ)) {
+	print(colnames(s.occ)[x])
+	
+	# gridding the native niche
+	grid.clim.t.s <- ecospat.grid.clim.dyn(glob = globalEnvM[,x],
+																				 glob1 = data.frame(s_ENVM[,x]),
+																				 (s.occ)[,x], R = 1000, th.sp = 0)
+	
+	# gridding the invasive niche
+	grid.clim.t.n <- ecospat.grid.clim.dyn (glob = globalEnvM[,x], 
+																					glob1 = data.frame(n_ENVM[,x]), 
+																					(n.occ)[,x], R = 1000, th.sp = 0)
+	
+	
+	pdf(paste0("rst/NicheOverlapDyn/",colnames(s.occ)[x],"_NiOv.pdf"))
+	
+	ecospat.plot.niche.dyn(grid.clim.t.s, grid.clim.t.n, quant=0.1, interest=2, title= "Niche Overlap", name.axis1=paste0("Average ", colnames(s.occ)[x]))
+	
+	# showing the shift of the niche centroid along the temperature gradient (compared to the shift of the available climate in the study area)
+	ecospat.shift.centroids(data.frame(s.occ)[,x],
+													data.frame(n.occ)[,x],
+													data.frame(s_ENVM)[,x],
+													data.frame(n_ENVM)[,x])
+	dev.off()
+	
+}
